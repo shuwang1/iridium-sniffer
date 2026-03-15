@@ -36,6 +36,9 @@
 #ifdef HAVE_SOAPYSDR
 #include "soapysdr.h"
 #endif
+#ifdef HAVE_SDRPLAY
+#include "sdrplay.h"
+#endif
 
 #include "sdr.h"
 #include "iridium.h"
@@ -45,6 +48,7 @@
 #include "frame_output.h"
 #include "frame_decode.h"
 #include "web_map.h"
+#include "vita49.h"
 #include "ida_decode.h"
 #include "doppler_pos.h"
 #include "gsmtap.h"
@@ -115,6 +119,9 @@ char *soapy_setting_keys[SOAPY_SETTINGS_MAX];
 char *soapy_setting_vals[SOAPY_SETTINGS_MAX];
 int soapy_setting_count = 0;
 #endif
+#ifdef HAVE_SDRPLAY
+char *sdrplay_serial = NULL;
+#endif
 
 /* Per-SDR gain settings (defaults from gr-iridium example configs) */
 int hackrf_lna_gain = 40;
@@ -123,6 +130,7 @@ int hackrf_amp_enable = 0;
 int bladerf_gain_val = 40;
 int usrp_gain_val = 40;
 double soapy_gain_val = 30.0;
+int sdrplay_gain_val = 40;
 int bias_tee = 0;
 int web_enabled = 0;
 int web_port = 8888;
@@ -130,12 +138,8 @@ int gsmtap_enabled = 0;
 char *gsmtap_host = NULL;
 int gsmtap_port = GSMTAP_DEFAULT_PORT;
 
-/* GPU acceleration: enabled by default when compiled with GPU support */
-#ifdef USE_GPU
+/* GPU acceleration: enabled by default, loaded via dlopen plugin at runtime */
 int use_gpu = 1;
-#else
-int use_gpu = 0;
-#endif
 
 int no_simd = 0;
 char *save_bursts_dir = NULL;
@@ -164,6 +168,15 @@ int feed_tcp_port = 0;
 int zmq_enabled = 0;
 char *zmq_endpoint = NULL;
 #define ZMQ_DEFAULT_ENDPOINT "tcp://*:7006"
+
+/* ZMQ SUB input for receiving IQ samples over network */
+int zmq_sub_enabled = 0;
+char *zmq_sub_endpoint = NULL;
+#define ZMQ_SUB_DEFAULT_ENDPOINT "tcp://127.0.0.1:5555"
+
+/* VITA 49 (VRT) UDP input */
+int vita49_enabled = 0;
+char *vita49_endpoint = NULL;
 
 /* ---- Beam cache for ACARS aircraft position correlation ---- */
 /* Stores recent IRA ground beam positions (alt < 100) so the ACARS
@@ -328,6 +341,123 @@ static void *spewer_thread(void *arg) {
     kill(self_pid, SIGINT);
     return NULL;
 }
+
+/* ---- ZMQ SUB input thread ---- */
+#ifdef HAVE_ZMQ
+#include <zmq.h>
+
+static void *zmq_sub_ctx = NULL;
+static void *zmq_sub_socket = NULL;
+
+static void *zmq_sub_thread(void *arg) {
+    (void)arg;
+
+    zmq_sub_ctx = zmq_ctx_new();
+    if (!zmq_sub_ctx) {
+        warnx("zmq-sub: cannot create context");
+        running = 0;
+        kill(self_pid, SIGINT);
+        return NULL;
+    }
+
+    zmq_sub_socket = zmq_socket(zmq_sub_ctx, ZMQ_SUB);
+    if (!zmq_sub_socket) {
+        warnx("zmq-sub: cannot create socket");
+        zmq_ctx_destroy(zmq_sub_ctx);
+        zmq_sub_ctx = NULL;
+        running = 0;
+        kill(self_pid, SIGINT);
+        return NULL;
+    }
+
+    /* Subscribe to all messages */
+    zmq_setsockopt(zmq_sub_socket, ZMQ_SUBSCRIBE, "", 0);
+
+    const char *ep = zmq_sub_endpoint ? zmq_sub_endpoint
+                                      : ZMQ_SUB_DEFAULT_ENDPOINT;
+    if (zmq_connect(zmq_sub_socket, ep) != 0) {
+        warnx("zmq-sub: cannot connect to %s: %s", ep, zmq_strerror(errno));
+        zmq_close(zmq_sub_socket);
+        zmq_ctx_destroy(zmq_sub_ctx);
+        zmq_sub_socket = NULL;
+        zmq_sub_ctx = NULL;
+        running = 0;
+        kill(self_pid, SIGINT);
+        return NULL;
+    }
+
+    fprintf(stderr, "zmq-sub: connected to %s (format=%s)\n", ep,
+            iq_format == FMT_CF32 ? "cf32" :
+            iq_format == FMT_CI16 ? "cs16" : "cs8");
+
+    while (running) {
+        zmq_msg_t msg;
+        zmq_msg_init(&msg);
+
+        int rc = zmq_msg_recv(&msg, zmq_sub_socket, 0);
+        if (rc < 0) {
+            zmq_msg_close(&msg);
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+
+        size_t len = zmq_msg_size(&msg);
+        void *data = zmq_msg_data(&msg);
+
+        sample_buf_t *s;
+        size_t num_samples;
+
+        switch (iq_format) {
+        case FMT_CF32:
+            /* 8 bytes per sample (2 x float32) */
+            num_samples = len / 8;
+            if (num_samples == 0) { zmq_msg_close(&msg); continue; }
+            s = malloc(sizeof(*s) + num_samples * 8);
+            s->format = SAMPLE_FMT_FLOAT;
+            memcpy(s->samples, data, num_samples * 8);
+            break;
+
+        case FMT_CI16: {
+            /* 4 bytes per sample -> convert to int8 */
+            num_samples = len / 4;
+            if (num_samples == 0) { zmq_msg_close(&msg); continue; }
+            s = malloc(sizeof(*s) + num_samples * 2);
+            s->format = SAMPLE_FMT_INT8;
+            int16_t *src = (int16_t *)data;
+            for (size_t i = 0; i < num_samples * 2; i++)
+                s->samples[i] = (int8_t)(src[i] >> 8);
+            break;
+        }
+
+        case FMT_CI8:
+        default:
+            /* 2 bytes per sample (native int8) */
+            num_samples = len / 2;
+            if (num_samples == 0) { zmq_msg_close(&msg); continue; }
+            s = malloc(sizeof(*s) + num_samples * 2);
+            s->format = SAMPLE_FMT_INT8;
+            memcpy(s->samples, data, num_samples * 2);
+            break;
+        }
+
+        zmq_msg_close(&msg);
+
+        s->num = num_samples;
+        s->hw_timestamp_ns = 0;
+        push_samples(s);
+    }
+
+    zmq_close(zmq_sub_socket);
+    zmq_ctx_destroy(zmq_sub_ctx);
+    zmq_sub_socket = NULL;
+    zmq_sub_ctx = NULL;
+
+    running = 0;
+    kill(self_pid, SIGINT);
+    return NULL;
+}
+#endif /* HAVE_ZMQ */
 
 /* ---- IDA/GSMTAP state ---- */
 
@@ -616,6 +746,10 @@ int main(int argc, char **argv) {
     SoapySDRDevice *soapy = NULL;
     pthread_t soapy_thread;
 #endif
+#ifdef HAVE_SDRPLAY
+    void *sdrplay_ctx = NULL;
+    pthread_t sdrplay_thread;
+#endif
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -777,6 +911,13 @@ int main(int argc, char **argv) {
             sdr_started = 1;
         }
 #endif
+#ifdef HAVE_SDRPLAY
+        if (!sdr_started && sdrplay_serial) {
+            sdrplay_ctx = sdrplay_setup(sdrplay_serial);
+            pthread_create(&sdrplay_thread, NULL, sdrplay_stream_thread, sdrplay_ctx);
+            sdr_started = 1;
+        }
+#endif
 #ifdef HAVE_HACKRF
         if (!sdr_started && serial != NULL) {
             hackrf = hackrf_setup();
@@ -791,6 +932,20 @@ int main(int argc, char **argv) {
         pthread_create(&spewer, NULL, spewer_thread, in_file);
 #ifdef __linux__
         pthread_setname_np(spewer, "spewer");
+#endif
+    }
+#ifdef HAVE_ZMQ
+    else if (zmq_sub_enabled) {
+        pthread_create(&spewer, NULL, zmq_sub_thread, NULL);
+#ifdef __linux__
+        pthread_setname_np(spewer, "zmq-sub");
+#endif
+    }
+#endif
+    else if (vita49_enabled) {
+        pthread_create(&spewer, NULL, vita49_thread, NULL);
+#ifdef __linux__
+        pthread_setname_np(spewer, "vita49");
 #endif
     }
 
@@ -832,11 +987,23 @@ int main(int argc, char **argv) {
             soapy_close(soapy);
         }
 #endif
+#ifdef HAVE_SDRPLAY
+        if (sdrplay_ctx != NULL) {
+            pthread_join(sdrplay_thread, NULL);
+            sdrplay_close(sdrplay_ctx);
+        }
+#endif
     }
 
     /* Drain queues and join threads in pipeline order */
     blocking_queue_close(&samples_queue);
     if (!live && in_file != NULL)
+        pthread_join(spewer, NULL);
+#ifdef HAVE_ZMQ
+    if (zmq_sub_enabled)
+        pthread_join(spewer, NULL);
+#endif
+    if (vita49_enabled)
         pthread_join(spewer, NULL);
     pthread_join(detector, NULL);
 

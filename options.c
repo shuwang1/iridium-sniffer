@@ -30,6 +30,9 @@
 #ifdef HAVE_SOAPYSDR
 #include "soapysdr.h"
 #endif
+#ifdef HAVE_SDRPLAY
+#include "sdrplay.h"
+#endif
 
 typedef enum {
     FMT_CI8 = 0,
@@ -61,6 +64,9 @@ extern char *soapy_setting_keys[SOAPY_SETTINGS_MAX];
 extern char *soapy_setting_vals[SOAPY_SETTINGS_MAX];
 extern int soapy_setting_count;
 #endif
+#ifdef HAVE_SDRPLAY
+extern char *sdrplay_serial;
+#endif
 
 extern int hackrf_lna_gain;
 extern int hackrf_vga_gain;
@@ -68,6 +74,7 @@ extern int hackrf_amp_enable;
 extern int bladerf_gain_val;
 extern int usrp_gain_val;
 extern double soapy_gain_val;
+extern int sdrplay_gain_val;
 extern int bias_tee;
 extern int use_gpu;
 extern int no_simd;
@@ -96,6 +103,10 @@ extern char *feed_tcp_host;
 extern int feed_tcp_port;
 extern int zmq_enabled;
 extern char *zmq_endpoint;
+extern int zmq_sub_enabled;
+extern char *zmq_sub_endpoint;
+extern int vita49_enabled;
+extern char *vita49_endpoint;
 extern int clock_source;
 extern int time_source;
 
@@ -114,6 +125,7 @@ static void usage(int exitcode) {
 "    -i, --interface=IFACE   SDR to use (see --list for available devices):\n"
 "                             soapy-N (by index) or soapy:driver=X,serial=Y (by args)\n"
 "                             hackrf-SERIAL, bladerfN, usrp-PRODUCT-SERIAL\n"
+"                             sdrplay-SERIAL (native SDRplay API)\n"
 "    -c, --center-freq=HZ    center frequency in Hz (default: 1622000000)\n"
 "    -r, --sample-rate=HZ    sample rate in Hz (default: 10000000)\n"
 "    -B, --bias-tee           enable bias tee power\n"
@@ -127,14 +139,13 @@ static void usage(int exitcode) {
 "    --bladerf-gain=GAIN     BladeRF gain in dB (default: 40)\n"
 "    --usrp-gain=GAIN        USRP gain in dB (default: 40)\n"
 "    --soapy-gain=GAIN       SoapySDR gain in dB (default: 30)\n"
+"    --sdrplay-gain=GAIN    SDRplay gain in dB (default: 40)\n"
 "    --soapy-setting=K:V    SoapySDR device setting (repeatable)\n"
 "                             e.g. bitpack:true (Airspy), biastee_rx:true (bladeRF)\n"
 "\n"
 "Detection options:\n"
 "    -d, --threshold=DB      burst detection threshold in dB (default: 16.0)\n"
-#ifdef USE_GPU
 "    --no-gpu                disable GPU acceleration (use CPU FFTW)\n"
-#endif
 "    --no-simd               disable SIMD acceleration (use scalar kernels)\n"
 "    --chase[=N]             enable Chase soft-decision BCH decoder (experimental)\n"
 "                             N = flip-bits count, 0-7 (default 5 = 31 combos).\n"
@@ -170,7 +181,11 @@ static void usage(int exitcode) {
 #ifdef HAVE_ZMQ
 "    --zmq[=ENDPOINT]     publish output via ZMQ PUB socket for multi-consumer\n"
 "                             (default: tcp://*:7006, compatible with iridium-toolkit)\n"
+"    --zmq-sub[=ENDPOINT]  receive IQ samples via ZMQ SUB socket\n"
+"                             (default: tcp://127.0.0.1:5555, use with -f and -r)\n"
 #endif
+"    --vita49[=IP:PORT]    receive IQ via VITA 49 (VRT) UDP packets\n"
+"                             (default: 0.0.0.0:4991, use with --format and -r)\n"
 "    -v, --verbose           verbose output to stderr\n"
 "    -h, --help              show this help\n"
 "    --list                  list available SDR interfaces\n"
@@ -182,6 +197,7 @@ static void usage(int exitcode) {
 }
 
 static void list_interfaces(void) {
+    printf("Available SDR interfaces (-i VALUE):\n");
 #ifdef HAVE_HACKRF
     hackrf_list();
 #endif
@@ -191,10 +207,16 @@ static void list_interfaces(void) {
 #ifdef HAVE_UHD
     usrp_list();
 #endif
+#ifdef HAVE_SDRPLAY
+    sdrplay_list();
+#endif
 #ifdef HAVE_SOAPYSDR
     soapy_list();
 #endif
-    exit(0);
+    fflush(stdout);
+    /* Use _exit to skip atexit/destructor handlers -- SoapySDR's SDRplay
+     * module conflicts with the native API during library teardown. */
+    _exit(0);
 }
 
 void parse_options(int argc, char **argv) {
@@ -230,8 +252,11 @@ void parse_options(int argc, char **argv) {
         OPT_STATION,
         OPT_SOAPY_SETTING,
         OPT_ZMQ,
+        OPT_ZMQ_SUB,
         OPT_CLOCK_SOURCE,
         OPT_TIME_SOURCE,
+        OPT_SDRPLAY_GAIN,
+        OPT_VITA49,
     };
 
     static const struct option longopts[] = {
@@ -271,8 +296,11 @@ void parse_options(int argc, char **argv) {
         { "station",        required_argument, NULL, OPT_STATION },
         { "soapy-setting",  required_argument, NULL, OPT_SOAPY_SETTING },
         { "zmq",            optional_argument, NULL, OPT_ZMQ },
+        { "zmq-sub",        optional_argument, NULL, OPT_ZMQ_SUB },
         { "clock-source",   required_argument, NULL, OPT_CLOCK_SOURCE },
         { "time-source",    required_argument, NULL, OPT_TIME_SOURCE },
+        { "sdrplay-gain",   required_argument, NULL, OPT_SDRPLAY_GAIN },
+        { "vita49",         optional_argument, NULL, OPT_VITA49 },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -315,6 +343,12 @@ void parse_options(int argc, char **argv) {
                 }
                 if (strstr(optarg, "soapy-") == optarg) {
                     soapy_num = atoi(optarg + 6);
+                    break;
+                }
+#endif
+#ifdef HAVE_SDRPLAY
+                if (strstr(optarg, "sdrplay-") == optarg) {
+                    sdrplay_serial = strdup(optarg + 8);
                     break;
                 }
 #endif
@@ -367,6 +401,7 @@ void parse_options(int argc, char **argv) {
             case OPT_BLADERF_GAIN: bladerf_gain_val = atoi(optarg); break;
             case OPT_USRP_GAIN:   usrp_gain_val    = atoi(optarg); break;
             case OPT_SOAPY_GAIN:  soapy_gain_val   = atof(optarg); break;
+            case OPT_SDRPLAY_GAIN: sdrplay_gain_val = atoi(optarg); break;
             case OPT_NO_GPU:      use_gpu = 0;                       break;
             case OPT_NO_SIMD:     no_simd = 1;                       break;
             case OPT_CHASE:
@@ -504,6 +539,22 @@ void parse_options(int argc, char **argv) {
 #endif
                 break;
 
+            case OPT_ZMQ_SUB:
+#ifdef HAVE_ZMQ
+                zmq_sub_enabled = 1;
+                if (optarg)
+                    zmq_sub_endpoint = strdup(optarg);
+#else
+                errx(1, "--zmq-sub requires ZMQ support (install libzmq3-dev and rebuild)");
+#endif
+                break;
+
+            case OPT_VITA49:
+                vita49_enabled = 1;
+                if (optarg)
+                    vita49_endpoint = strdup(optarg);
+                break;
+
             case OPT_SOAPY_SETTING:
 #ifdef HAVE_SOAPYSDR
                 if (soapy_setting_count >= SOAPY_SETTINGS_MAX)
@@ -570,14 +621,26 @@ void parse_options(int argc, char **argv) {
 #ifdef HAVE_SOAPYSDR
         || soapy_num >= 0 || soapy_args
 #endif
+#ifdef HAVE_SDRPLAY
+        || sdrplay_serial
+#endif
     )
         live = 1;
 
-    if (!live && in_file == NULL)
+    if (!live && in_file == NULL && !zmq_sub_enabled && !vita49_enabled)
         usage(1);
 
     if (live && in_file != NULL)
         errx(1, "Cannot use both --live and --file");
+
+    if (zmq_sub_enabled && (live || in_file != NULL))
+        errx(1, "Cannot use --zmq-sub with --live or --file");
+
+    if (vita49_enabled && (live || in_file != NULL))
+        errx(1, "Cannot use --vita49 with --live or --file");
+
+    if (vita49_enabled && zmq_sub_enabled)
+        errx(1, "Cannot use --vita49 with --zmq-sub");
 
     /* Auto-detect format from file extension if not explicitly specified */
     if (in_filename && !format_explicit) {

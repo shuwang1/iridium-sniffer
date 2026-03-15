@@ -2,7 +2,7 @@
 
 A standalone Iridium satellite burst detector and demodulator written in C. It provides an alternative to [gr-iridium](https://github.com/muccc/gr-iridium) by eliminating the GNU Radio dependency, while producing the same [iridium-toolkit](https://github.com/muccc/iridium-toolkit) compatible RAW output on stdout. For users who want a lighter-weight, dependency-free option or need embedded deployment, this offers similar functionality with a different architectural approach.
 
-Supports HackRF, BladeRF, USRP (UHD), and SoapySDR for live capture, or processes IQ recordings from file. Optional GPU-accelerated burst detection is available via OpenCL (NVIDIA, AMD, Intel). Runs on Raspberry Pi 5 and other ARM boards in CPU-only mode with FFTW wisdom pre-generation.
+Supports HackRF, BladeRF, USRP (UHD), SDRplay (native API), and SoapySDR for live capture, or processes IQ recordings from file. Optional GPU-accelerated burst detection is available via OpenCL (NVIDIA, AMD, Intel) as a runtime plugin -- the main binary works on systems without GPU support. Runs on Raspberry Pi 5 and other ARM boards in CPU-only mode with FFTW wisdom pre-generation.
 
 A built-in web map (`--web`, beta) provides a real-time Leaflet.js visualization of decoded ring alert positions and active satellites -- no external tools or Python required.
 
@@ -22,6 +22,7 @@ Native GSMTAP output (`--gsmtap`) sends decoded IDA (Iridium Data) frames direct
 - Doppler-based receiver positioning from decoded satellite signals (`--position`)
 - GPU-accelerated FFT burst detection (OpenCL or Vulkan)
 - ZMQ PUB/SUB output (`--zmq`) for multi-consumer iridium-toolkit compatibility
+- ZMQ SUB and VITA 49 (VRT) network IQ input for remote SDR and distributed setups
 - Multi-threaded architecture: detection, downmix pool, demodulation, stats
 - HackRF, BladeRF, USRP, and SoapySDR support
 - Reads ci8, ci16, and cf32 IQ files with auto-detection from file extension
@@ -56,6 +57,7 @@ sudo apt install libhackrf-dev      # HackRF One
 sudo apt install libbladerf-dev     # BladeRF
 sudo apt install libuhd-dev         # USRP (B2x0, N2x0, X3x0, etc.)
 sudo apt install libsoapysdr-dev    # RTL-SDR, Airspy, LimeSDR, etc. via SoapySDR
+# SDRplay native API: install from https://www.sdrplay.com/api/
 
 # Optional: ACARS ARINC-622/ADS-C/CPDLC decoding
 sudo apt install libacars-dev        # libacars-2
@@ -628,6 +630,9 @@ Then specify the interface with `-i`. SoapySDR devices can be selected by index 
 # USRP (use serial from --list)
 ./iridium-sniffer -i usrp-PRODUCT-SERIAL
 
+# SDRplay (native API, use serial from --list)
+./iridium-sniffer -i sdrplay-SERIAL
+
 # BladeRF
 ./iridium-sniffer -i bladerf1
 
@@ -635,6 +640,7 @@ Then specify the interface with `-i`. SoapySDR devices can be selected by index 
 ./iridium-sniffer -i soapy-0 -B --soapy-gain=40
 ./iridium-sniffer -i hackrf-SERIAL --hackrf-lna=40 --hackrf-vga=20
 ./iridium-sniffer -i usrp-PRODUCT-SERIAL --usrp-gain=50
+./iridium-sniffer -i sdrplay-SERIAL --sdrplay-gain=50 -B
 
 # SoapySDR device-specific settings
 ./iridium-sniffer -i soapy:driver=airspy,serial=ABC --soapy-setting=bitpack:true
@@ -708,6 +714,42 @@ ZMQ PUB sockets are non-blocking: if no subscribers are connected, messages are 
 
 Requires libzmq (`sudo apt install libzmq3-dev`). The feature is compiled in only when libzmq is detected at build time.
 
+### ZMQ SUB Input
+
+Receive IQ samples from a remote SDR over a ZMQ PUB socket. This enables running the SDR on one machine and iridium-sniffer on another, or sharing a single SDR stream across multiple decoders.
+
+```bash
+# Receive cf32 IQ samples from GNU Radio ZMQ PUB sink
+./iridium-sniffer --zmq-sub=tcp://192.168.1.10:5555 --format=cf32 -r 10000000
+
+# Default endpoint (localhost:5555)
+./iridium-sniffer --zmq-sub --format=cf32 -r 10000000
+
+# With web map and custom center frequency
+./iridium-sniffer --zmq-sub=tcp://remote-sdr:5555 --format=cf32 -r 10000000 -c 1622000000 --web
+```
+
+The sample format (`--format`) and sample rate (`-r`) must match what the publisher is sending. GNU Radio's `zeromq.pub_sink` typically outputs cf32 (complex float32).
+
+### VITA 49 (VRT) Input
+
+Receive IQ samples via VITA 49 / VRT signal data packets over UDP. This enables receiving from SDR platforms that output VITA 49, such as FlexRadio, REDHAWK SCA, or custom VRT sources.
+
+```bash
+# Receive cf32 IQ via VITA 49 on default port (0.0.0.0:4991)
+./iridium-sniffer --vita49 --format=cf32 -r 10000000
+
+# Specify bind address and port
+./iridium-sniffer --vita49=192.168.1.100:5000 --format=cf32 -r 10000000
+
+# With web map
+./iridium-sniffer --vita49 --format=cf32 -r 10000000 --web
+```
+
+The parser accepts VRT signal data packets (type 0x0 and 0x1) and silently skips context and command packets. The `--format` and `-r` must match the IQ sample format within the VRT payload. Sequence gap detection is built in and logged at shutdown.
+
+No external libraries are required -- VITA 49 header parsing uses only POSIX sockets.
+
 ## Command Reference
 
 ```
@@ -723,6 +765,7 @@ SDR options:
     -i, --interface=IFACE   SDR to use (see --list for available devices):
                              soapy-N (by index) or soapy:key=val,... (by args)
                              hackrf-SERIAL, bladerfN, usrp-PRODUCT-SERIAL
+                             sdrplay-SERIAL (native SDRplay API)
     -c, --center-freq=HZ    center frequency in Hz (default: 1622000000)
     -r, --sample-rate=HZ    sample rate in Hz (default: 10000000)
     -B, --bias-tee          enable bias tee power
@@ -738,6 +781,7 @@ Gain options:
     --soapy-gain=GAIN       SoapySDR gain in dB (default: 40)
     --soapy-setting=K:V    SoapySDR device setting (repeatable)
                              e.g. bitpack:true (Airspy), biastee_rx:true (bladeRF)
+    --sdrplay-gain=GAIN     SDRplay gain in dB, 0-59 (default: 40)
 
 Detection:
     -d, --threshold=DB      burst detection threshold in dB (default: 16.0)
@@ -761,6 +805,10 @@ ACARS:
 
 ZMQ:
     --zmq[=ENDPOINT]        publish output via ZMQ PUB (default: tcp://*:7006)
+    --zmq-sub[=ENDPOINT]    receive IQ samples via ZMQ SUB (default: tcp://127.0.0.1:5555)
+
+VITA 49:
+    --vita49[=IP:PORT]      receive IQ via VITA 49 (VRT) UDP (default: 0.0.0.0:4991)
 
 Output:
     --file-info=STR         file info string for RAW output (default: auto)
@@ -800,6 +848,7 @@ Any SDR that tunes to L-band (1616-1626.5 MHz) and samples at 2 MHz or above wil
 | Ettus USRP B210 | 12-bit | 56 MHz | Best sensitivity, dual channel |
 | HackRF One | 8-bit | 20 MHz | Widely available, good performance |
 | BladeRF | 12-bit | 40 MHz | Good sensitivity |
+| SDRplay RSPdx/RSP1A/RSP1B | 14-bit | 10 MHz | Native API, bias tee on Antenna B (RSPdx/RSP2) |
 | RTL-SDR (via SoapySDR) | 8-bit | 2.4 MHz | Limited bandwidth, but works |
 | Airspy, LimeSDR, etc. | varies | varies | Via SoapySDR |
 

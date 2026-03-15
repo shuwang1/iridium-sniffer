@@ -26,6 +26,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "net_util.h"
 #include "sbd_acars.h"
 #include "web_map.h"
 
@@ -242,9 +243,16 @@ static void hub_emit_acars(const char *mode, const char *reg, char ack,
 {
     if (hub_fd < 0 && airframes_fd < 0 && !airframes_saved_host) return;
 
-    /* Timestamp as ISO-8601 */
+    /* Timestamp as ISO-8601 -- use wall clock for feed output so
+     * aggregators (acars_router) don't reject messages as stale
+     * when processing backlog causes sample-derived time to lag. */
     char ts_buf[32];
-    format_timestamp(timestamp, ts_buf, sizeof(ts_buf));
+    {
+        time_t now = time(NULL);
+        struct tm tm;
+        gmtime_r(&now, &tm);
+        strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    }
 
     /* Escape strings */
     char esc_reg[64], esc_label[16], esc_text[2048];
@@ -1342,8 +1350,8 @@ void acars_init(const char *station_id, const char **udp_hosts,
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(udp_ports[i]);
-        if (inet_pton(AF_INET, udp_hosts[i], &addr.sin_addr) != 1) {
-            fprintf(stderr, "acars_init: invalid UDP host '%s'\n",
+        if (resolve_host_ipv4(udp_hosts[i], &addr.sin_addr) < 0) {
+            fprintf(stderr, "acars_init: cannot resolve UDP host '%s'\n",
                     udp_hosts[i]);
             close(fd);
             continue;
@@ -1364,8 +1372,8 @@ void acars_init(const char *station_id, const char **udp_hosts,
             memset(&hub_addr, 0, sizeof(hub_addr));
             hub_addr.sin_family = AF_INET;
             hub_addr.sin_port = htons(hub_port);
-            if (inet_pton(AF_INET, hub_host, &hub_addr.sin_addr) != 1) {
-                fprintf(stderr, "acars_init: invalid acarshub host '%s'\n",
+            if (resolve_host_ipv4(hub_host, &hub_addr.sin_addr) < 0) {
+                fprintf(stderr, "acars_init: cannot resolve acarshub host '%s'\n",
                         hub_host);
                 close(hub_fd);
                 hub_fd = -1;
