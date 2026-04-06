@@ -572,10 +572,11 @@ Output format (one line per position):
 MSG,3,1,1,A98539,1,2026/04/06,00:15:54.000,2026/04/06,00:15:54.000,UAL928,37000,,,52.000,-40.000,,,,0
 ```
 
-Three position sources feed the output, in priority order:
+Four position sources feed the output, in priority order:
 1. **ADS-C GPS** -- structured position from ARINC-622 ADS-C reports (requires libacars)
-2. **ACARS free text** -- position extracted from known message labels (H1/POS, label 20, 44, 4J, 15, SA)
-3. **Beam estimate** -- approximate position from IRA ground beam correlation (~200 km accuracy)
+2. **ACARS free text** -- coordinates extracted from known message labels (H1/POS, label 20, 44, 4J, 15, SA)
+3. **Waypoint lookup** -- first/current fix name resolved via bundled 125K-entry aviation waypoint database
+4. **Beam estimate** -- approximate position from IRA ground beam correlation (~200 km accuracy)
 
 The aircraft database is stored at `~/.iridium-sniffer/aircraft.csv` and can be updated at any time with `--update-db`. Use `--aircraft-db=PATH` to specify a custom path.
 
