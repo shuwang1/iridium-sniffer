@@ -20,6 +20,7 @@
 #include <netinet/in.h>
 
 #include "basestation.h"
+#include "waypoint_db.h"
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -681,6 +682,78 @@ static int acars_extract_text_position(const char *label, const char *text,
     return 0;
 }
 
+/*
+ * Extract aircraft position from waypoint name in ACARS text.
+ * Only uses the FIRST waypoint reference (current position fix),
+ * not subsequent ones (which are "next" or destination waypoints).
+ *
+ * Scans for 5-letter uppercase sequences that match the waypoint database.
+ * Returns 1 if a valid waypoint was found and resolved, 0 otherwise.
+ */
+static int acars_extract_waypoint_position(const char *label, const char *text,
+                                            double *lat, double *lon)
+{
+    if (!label || !text || !text[0])
+        return 0;
+
+    /* Same label gate as coordinate extraction */
+    int label_ok = 0;
+    if (label[0] == 'H' && label[1] == '1') label_ok = 1;
+    else if (label[0] == '2' && label[1] == '0') label_ok = 1;
+    else if (label[0] == '4' && label[1] == '4') label_ok = 1;
+    else if (label[0] == '4' && label[1] == 'J') label_ok = 1;
+    else if (label[0] == '1' && label[1] == '5') label_ok = 1;
+    else if (label[0] == 'S' && label[1] == 'A') label_ok = 1;
+    if (!label_ok) return 0;
+
+    /* Skip FPN (flight plan) preamble */
+    if (label[0] == 'H' && label[1] == '1' && strncmp(text, "FPN", 3) == 0)
+        return 0;
+
+    /* In POS messages, the waypoint after the coordinate block is the
+     * current fix. Format: POS[coords],WAYPOINT,time,...
+     * If we get here, coordinate extraction already failed, so look for
+     * the first comma-separated 5-letter token after "POS". */
+    const char *scan = text;
+
+    /* If text starts with POS, skip past it to find waypoint fields */
+    if (strncmp(scan, "POS", 3) == 0)
+        scan += 3;
+
+    /* Scan for 5-letter uppercase tokens (comma or space delimited) */
+    while (*scan) {
+        /* Skip to next potential start of a token */
+        while (*scan && *scan != ',' && *scan != ' ' && *scan != '/')
+            scan++;
+        while (*scan == ',' || *scan == ' ' || *scan == '/')
+            scan++;
+
+        /* Check if we have a 5-letter uppercase sequence */
+        if (scan[0] >= 'A' && scan[0] <= 'Z' &&
+            scan[1] >= 'A' && scan[1] <= 'Z' &&
+            scan[2] >= 'A' && scan[2] <= 'Z' &&
+            scan[3] >= 'A' && scan[3] <= 'Z' &&
+            scan[4] >= 'A' && scan[4] <= 'Z' &&
+            (scan[5] == ',' || scan[5] == ' ' || scan[5] == '/' ||
+             scan[5] == '\0' || scan[5] == '\r' || scan[5] == '\n')) {
+
+            char ident[6];
+            memcpy(ident, scan, 5);
+            ident[5] = '\0';
+
+            /* Look up in waypoint database */
+            if (waypoint_db_lookup(ident, lat, lon))
+                return 1;
+        }
+
+        /* Move past this token */
+        while (*scan && *scan != ',' && *scan != ' ' && *scan != '/')
+            scan++;
+    }
+
+    return 0;
+}
+
 static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                                   uint64_t timestamp, double frequency,
                                   float magnitude)
@@ -869,24 +942,27 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
          * Only attempt on labels known to carry current aircraft position
          * (not destination waypoints or flight plan coordinates). */
         int text_pos = 0;
+        int wp_pos = 0;
         if (!adsc_pos && msg->txt && msg->txt[0]) {
             text_pos = acars_extract_text_position(msg->label, msg->txt,
                                                     &pos_lat, &pos_lon);
+            if (!text_pos)
+                wp_pos = acars_extract_waypoint_position(msg->label, msg->txt,
+                                                          &pos_lat, &pos_lon);
         }
 
         /* Position source priority:
          *   1. ADS-C GPS (structured, highest confidence)
-         *   2. Free text position (aircraft-reported, label-gated)
-         *   3. Beam cache estimate (~200 km accuracy) */
+         *   2. Free text coordinates (aircraft-reported, label-gated)
+         *   3. Waypoint name lookup (first/current fix from message)
+         *   4. Beam cache estimate (~200 km accuracy) */
         int have_pos;
         if (adsc_pos) {
             have_pos = 1;
-            /* Still look up sat/beam context from cache */
             double bx, by;
             beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
-        } else if (text_pos) {
+        } else if (text_pos || wp_pos) {
             have_pos = 1;
-            /* Mark as GPS-quality (came from aircraft avionics) */
             adsc_pos = 1;
             double bx, by;
             beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
@@ -1342,7 +1418,7 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                 }
             }
 
-            /* Try free text position extraction */
+            /* Try free text position extraction, then waypoint fallback */
             double pos_lat = 0, pos_lon = 0;
             int have_text_pos = 0;
             if (txt_f && txt_f_len > 0) {
@@ -1353,6 +1429,9 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                 txt_z[zlen] = '\0';
                 have_text_pos = acars_extract_text_position(label_f, txt_z,
                                                              &pos_lat, &pos_lon);
+                if (!have_text_pos)
+                    have_text_pos = acars_extract_waypoint_position(
+                                        label_f, txt_z, &pos_lat, &pos_lon);
             }
 
             int bc_sat = 0, bc_beam = 0;
