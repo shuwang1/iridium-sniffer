@@ -440,68 +440,6 @@ typedef struct {
 
 static sbd_multi_t sbd_multi[SBD_MAX_MULTI];
 
-/* ================================================================
- * libacars path -- full ARINC-622/ADS-C/CPDLC decoding
- *
- * JSON output follows the dumpvdl2/dumphfdl envelope format:
- *   {"iridium":{"app":{"name":"...","ver":"..."},"station":"...",
- *     "t":{"sec":N,"usec":N},"freq":N,"sig_level":N.N,
- *     "acars":{...libacars fields...}}}
- * ================================================================ */
-
-#ifdef HAVE_LIBACARS
-
-#include <libacars/json.h>
-#include <libacars/adsc.h>
-
-static la_reasm_ctx *reasm_ctx = NULL;
-
-/* Iridium message metadata for the JSON envelope */
-typedef struct {
-    const char *station;
-    struct timeval tv;
-    int64_t freq;
-    double sig_level;
-    const uint8_t *ir_hdr;
-    int ir_hdr_len;
-} iridium_metadata_t;
-
-/* la_type_descriptor format_json callback -- writes the iridium envelope
- * fields in the same style as dumpvdl2's la_vdl2_format_json */
-static void iridium_format_json(la_vstring *vstr, void const *data)
-{
-    const iridium_metadata_t *m = data;
-
-    la_json_object_start(vstr, "app");
-    la_json_append_string(vstr, "name", "iridium-sniffer");
-    la_json_append_string(vstr, "ver", "1.0");
-    la_json_object_end(vstr);
-
-    if (m->station)
-        la_json_append_string(vstr, "station", m->station);
-
-    la_json_object_start(vstr, "t");
-    la_json_append_int64(vstr, "sec", (int64_t)m->tv.tv_sec);
-    la_json_append_int64(vstr, "usec", (int64_t)m->tv.tv_usec);
-    la_json_object_end(vstr);
-
-    la_json_append_int64(vstr, "freq", m->freq);
-    la_json_append_double(vstr, "sig_level", m->sig_level);
-
-    if (m->ir_hdr && m->ir_hdr_len > 0)
-        la_json_append_octet_string(vstr, "header",
-                                    m->ir_hdr, m->ir_hdr_len);
-}
-
-/* Type descriptor: json_key "iridium" wraps the entire message,
- * matching the pattern of "vdl2" in dumpvdl2 and "hfdl" in dumphfdl */
-static la_type_descriptor const la_DEF_iridium_message = {
-    .format_text = NULL,
-    .destroy = NULL,
-    .format_json = iridium_format_json,
-    .json_key = "iridium",
-};
-
 /*
  * Extract aircraft position from ACARS free text body.
  *
@@ -754,6 +692,68 @@ static int acars_extract_waypoint_position(const char *label, const char *text,
 
     return 0;
 }
+
+/* ================================================================
+ * libacars path -- full ARINC-622/ADS-C/CPDLC decoding
+ *
+ * JSON output follows the dumpvdl2/dumphfdl envelope format:
+ *   {"iridium":{"app":{"name":"...","ver":"..."},"station":"...",
+ *     "t":{"sec":N,"usec":N},"freq":N,"sig_level":N.N,
+ *     "acars":{...libacars fields...}}}
+ * ================================================================ */
+
+#ifdef HAVE_LIBACARS
+
+#include <libacars/json.h>
+#include <libacars/adsc.h>
+
+static la_reasm_ctx *reasm_ctx = NULL;
+
+/* Iridium message metadata for the JSON envelope */
+typedef struct {
+    const char *station;
+    struct timeval tv;
+    int64_t freq;
+    double sig_level;
+    const uint8_t *ir_hdr;
+    int ir_hdr_len;
+} iridium_metadata_t;
+
+/* la_type_descriptor format_json callback -- writes the iridium envelope
+ * fields in the same style as dumpvdl2's la_vdl2_format_json */
+static void iridium_format_json(la_vstring *vstr, void const *data)
+{
+    const iridium_metadata_t *m = data;
+
+    la_json_object_start(vstr, "app");
+    la_json_append_string(vstr, "name", "iridium-sniffer");
+    la_json_append_string(vstr, "ver", "1.0");
+    la_json_object_end(vstr);
+
+    if (m->station)
+        la_json_append_string(vstr, "station", m->station);
+
+    la_json_object_start(vstr, "t");
+    la_json_append_int64(vstr, "sec", (int64_t)m->tv.tv_sec);
+    la_json_append_int64(vstr, "usec", (int64_t)m->tv.tv_usec);
+    la_json_object_end(vstr);
+
+    la_json_append_int64(vstr, "freq", m->freq);
+    la_json_append_double(vstr, "sig_level", m->sig_level);
+
+    if (m->ir_hdr && m->ir_hdr_len > 0)
+        la_json_append_octet_string(vstr, "header",
+                                    m->ir_hdr, m->ir_hdr_len);
+}
+
+/* Type descriptor: json_key "iridium" wraps the entire message,
+ * matching the pattern of "vdl2" in dumpvdl2 and "hfdl" in dumphfdl */
+static la_type_descriptor const la_DEF_iridium_message = {
+    .format_text = NULL,
+    .destroy = NULL,
+    .format_json = iridium_format_json,
+    .json_key = "iridium",
+};
 
 static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                                   uint64_t timestamp, double frequency,
