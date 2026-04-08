@@ -150,10 +150,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|x86|i[3-6]86")
         ${PROJECT_SOURCE_DIR}/simd_avx2.c)
     message(STATUS "SIMD: SSE4.2 + AVX2+FMA kernels enabled (runtime-detected)")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|ARM|aarch64|AARCH64")
-    # AArch64: NEON is mandatory — part of the base ISA, always present.
+    # AArch64: NEON is part of the base ISA, always present.
     # No extra compile flags required; <arm_neon.h> is unconditionally available.
-    list(APPEND SOURCES ${PROJECT_SOURCE_DIR}/simd_neon.c)
-    message(STATUS "SIMD: NEON kernels enabled (AArch64 mandatory)")
+    list(APPEND SOURCES 
+        ${PROJECT_SOURCE_DIR}/simd_neon.c)
+    message(STATUS "SIMD: NEON kernels enabled (AArch64)")
 else()
     message(STATUS "SIMD: scalar only (unrecognised platform)")
 endif()
