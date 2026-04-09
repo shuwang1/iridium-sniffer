@@ -901,6 +901,8 @@ VITA 49:
 BaseStation:
     --basestation[=PORT]    SBS server on PORT (default 30003, tools connect in)
     --basestation=HOST:PORT SBS push to remote host (auto-reconnect)
+    --basestation-beam      include beam-estimated positions (~200 km accuracy)
+                             (default: only GPS-quality positions are sent)
     --aircraft-db=PATH      aircraft database CSV (default: ~/.iridium-sniffer/aircraft.csv)
     --update-db             download/update aircraft database from tar1090-db and exit
 
