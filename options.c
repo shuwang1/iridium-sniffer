@@ -119,6 +119,7 @@ extern char *vita49_endpoint;
 extern int basestation_enabled;
 extern int basestation_beam;
 extern char *basestation_endpoint;
+extern int num_downmix_workers;
 extern char *aircraft_db_path;
 extern int samp_rate_explicit;
 extern int center_freq_explicit;
@@ -168,6 +169,7 @@ static void usage(int exitcode) {
 "    --no-gpu                disable GPU acceleration (use CPU FFTW)\n"
 "    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar\n"
 "    --no-simd               alias for --simd=scalar\n"
+"    --workers=N             downmix worker threads (default: auto from CPU cores)\n"
 "    --chase[=N]             enable Chase soft-decision BCH decoder (experimental)\n"
 "                             N = flip-bits count, 0-7 (default 5 = 31 combos).\n"
 "                             0 or omitting --chase disables (default).\n"
@@ -295,6 +297,7 @@ void parse_options(int argc, char **argv) {
         OPT_BASESTATION_BEAM,
         OPT_AIRCRAFT_DB,
         OPT_UPDATE_DB,
+        OPT_WORKERS,
     };
 
     static const struct option longopts[] = {
@@ -345,6 +348,7 @@ void parse_options(int argc, char **argv) {
         { "basestation-beam", no_argument,     NULL, OPT_BASESTATION_BEAM },
         { "aircraft-db",    required_argument, NULL, OPT_AIRCRAFT_DB },
         { "update-db",      no_argument,       NULL, OPT_UPDATE_DB },
+        { "workers",        required_argument, NULL, OPT_WORKERS },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -642,6 +646,14 @@ void parse_options(int argc, char **argv) {
             case OPT_UPDATE_DB: {
                 int ret = aircraft_db_update();
                 exit(ret == 0 ? 0 : 1);
+            }
+
+            case OPT_WORKERS: {
+                int w = atoi(optarg);
+                if (w < 1 || w > 8)
+                    errx(1, "--workers must be 1-8");
+                num_downmix_workers = w;
+                break;
             }
 
             case OPT_SOAPY_SETTING:

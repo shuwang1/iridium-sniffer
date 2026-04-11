@@ -255,7 +255,8 @@ pid_t self_pid;
 #define BURST_QUEUE_SIZE   2048
 #define FRAME_QUEUE_SIZE   512
 #define OUTPUT_QUEUE_SIZE  1024
-#define NUM_DOWNMIX_WORKERS 4
+#define MAX_DOWNMIX_WORKERS 8
+int num_downmix_workers = 0;  /* 0 = auto-detect from CPU cores */
 Blocking_Queue samples_queue;
 Blocking_Queue burst_queue;
 Blocking_Queue frame_queue;
@@ -1005,8 +1006,23 @@ int main(int argc, char **argv) {
     burst_detector_t *det = burst_detector_create(&det_config);
     global_detector = det;
 
-    burst_downmix_t *dm[NUM_DOWNMIX_WORKERS];
-    for (int i = 0; i < NUM_DOWNMIX_WORKERS; i++) {
+    /* Auto-detect worker count from CPU cores if not set via --workers */
+    if (num_downmix_workers <= 0) {
+        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+        if (ncpu >= 8)
+            num_downmix_workers = 4;
+        else if (ncpu >= 4)
+            num_downmix_workers = 2;
+        else
+            num_downmix_workers = 1;
+    }
+    if (num_downmix_workers > MAX_DOWNMIX_WORKERS)
+        num_downmix_workers = MAX_DOWNMIX_WORKERS;
+    fprintf(stderr, "iridium-sniffer: %d downmix workers (%ld CPU cores)\n",
+            num_downmix_workers, sysconf(_SC_NPROCESSORS_ONLN));
+
+    burst_downmix_t *dm[num_downmix_workers];
+    for (int i = 0; i < num_downmix_workers; i++) {
         downmix_config_t dm_config = { 0 };
         dm[i] = burst_downmix_create(&dm_config);
     }
@@ -1018,8 +1034,8 @@ int main(int argc, char **argv) {
 #endif
 
     /* Launch downmix worker pool */
-    pthread_t downmix_workers[NUM_DOWNMIX_WORKERS];
-    for (int i = 0; i < NUM_DOWNMIX_WORKERS; i++) {
+    pthread_t downmix_workers[num_downmix_workers];
+    for (int i = 0; i < num_downmix_workers; i++) {
         pthread_create(&downmix_workers[i], NULL, burst_downmix_thread, dm[i]);
 #ifdef __linux__
         char name[16];
@@ -1168,7 +1184,7 @@ int main(int argc, char **argv) {
     while (burst_queue.queue_size > 0)
         usleep(10000);
     blocking_queue_close(&burst_queue);
-    for (int i = 0; i < NUM_DOWNMIX_WORKERS; i++)
+    for (int i = 0; i < num_downmix_workers; i++)
         pthread_join(downmix_workers[i], NULL);
 
     /* Wait for frame_queue to drain before closing */
