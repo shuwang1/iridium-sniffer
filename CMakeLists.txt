@@ -152,6 +152,14 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/aircraft_db.c
     ${PROJECT_SOURCE_DIR}/basestation.c
     ${PROJECT_SOURCE_DIR}/waypoint_db.c
+    ${PROJECT_SOURCE_DIR}/voice_decode.c
+    ${PROJECT_SOURCE_DIR}/codec/ambe.c
+    ${PROJECT_SOURCE_DIR}/codec/ecc.c
+    ${PROJECT_SOURCE_DIR}/codec/frame.c
+    ${PROJECT_SOURCE_DIR}/codec/math.c
+    ${PROJECT_SOURCE_DIR}/codec/synth.c
+    ${PROJECT_SOURCE_DIR}/codec/tables.c
+    ${PROJECT_SOURCE_DIR}/codec/tone.c
 )
 
 # SIMD kernels — platform-specific, runtime-detected

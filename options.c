@@ -100,6 +100,7 @@ extern int position_enabled;
 extern double position_height;
 extern int acars_enabled;
 extern int acars_json;
+extern int voice_enabled;
 extern char *station_id;
 #define ACARS_UDP_MAX 4
 extern char *acars_udp_hosts[ACARS_UDP_MAX];
@@ -182,6 +183,7 @@ static void usage(int exitcode) {
 "    --web[=PORT]            enable live web map (default port: 8888)\n"
 "    --position[=HEIGHT_M]   estimate receiver position from Doppler shift\n"
 "                             optional height aiding in meters (implies --web)\n"
+"    --voice                 decode Iridium voice calls (AMBE, implies --web)\n"
 "\n"
 "GSMTAP:\n"
 "    --gsmtap[=HOST:PORT]    send IDA frames as GSMTAP/LAPDm via UDP\n"
@@ -298,6 +300,7 @@ void parse_options(int argc, char **argv) {
         OPT_AIRCRAFT_DB,
         OPT_UPDATE_DB,
         OPT_WORKERS,
+        OPT_VOICE,
     };
 
     static const struct option longopts[] = {
@@ -349,6 +352,7 @@ void parse_options(int argc, char **argv) {
         { "aircraft-db",    required_argument, NULL, OPT_AIRCRAFT_DB },
         { "update-db",      no_argument,       NULL, OPT_UPDATE_DB },
         { "workers",        required_argument, NULL, OPT_WORKERS },
+        { "voice",          no_argument,       NULL, OPT_VOICE },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -655,6 +659,11 @@ void parse_options(int argc, char **argv) {
                 num_downmix_workers = w;
                 break;
             }
+
+            case OPT_VOICE:
+                voice_enabled = 1;
+                web_enabled = 1;  /* voice implies web UI */
+                break;
 
             case OPT_SOAPY_SETTING:
 #ifdef HAVE_SOAPYSDR
